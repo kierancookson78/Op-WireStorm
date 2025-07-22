@@ -28,7 +28,7 @@ dist/
 *.lib
 *.lo
 *.class
-wirestorm
+*wirestorm
 
 # CMake files
 CMakeFiles/
