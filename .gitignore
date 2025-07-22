@@ -1,0 +1,48 @@
+# ─── Python ───────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.pyd
+*.env
+.env/
+.env.bak/
+venv/
+ENV/
+env/
+*.egg-info/
+build/
+dist/
+*.log
+*.sqlite3
+
+# ─── C++ ───────────────────────────────────────────
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.a
+*.lib
+*.lo
+*.class
+
+# CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+CMakeScripts/
+
+# ─── Visual Studio Code ───────────────────────────
+.vscode/
+*.code-workspace
+
+# ─── Miscellaneous ────────────────────────────────
+*.swp
+*.swo
+*.bak
+.DS_Store
+Thumbs.db
