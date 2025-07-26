@@ -17,7 +17,7 @@
 // CTMP Protocol Constants
 const uint8_t MAGIC_BYTE = 0xCC;
 const uint8_t PADDING_BYTE = 0x00;
-const size_t HEADER_SIZE = 4; // MAGIC (1 byte) + PADDING (1 byte) + LENGTH (2 bytes)
+const size_t HEADER_SIZE = 8; // MAGIC (1 byte) + PADDING (1 byte) + LENGTH (2 bytes)
 
 // Server Configuration
 const uint16_t SOURCE_PORT = 33333;
