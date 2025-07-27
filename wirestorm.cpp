@@ -6,6 +6,7 @@
 #include <condition_variable> // For signaling between threads (message queue)
 #include <cstring>      // For memory manipulation (memcpy, memset)
 #include <stdexcept>    // For standard exceptions
+#include <cerrno>       // For errno constants (EWOULDBLOCK, EAGAIN, etc.)
 
 // Networking specific headers
 #include <sys/socket.h> // For socket creation, bind, listen, accept, connect, send, recv
@@ -30,6 +31,10 @@ const uint16_t MAX_PAYLOAD_SIZE = 65535; // Maximum for 16-bit length field
 struct CTMPMessage {
     std::vector<uint8_t> data; // Stores the full message (header + payload)
 };
+
+// Function declarations
+uint16_t calculate_checksum(uint8_t* header, uint8_t* data, uint16_t data_length);
+uint16_t calculate_checksum_validation(uint8_t* header, uint8_t* data, uint16_t data_length);
 
 // Global shared resources for inter-thread communication and client management
 std::vector<int> destination_clients; // List of active destination client sockets
@@ -189,77 +194,77 @@ void source_listener_thread() {
         std::vector<uint8_t> data_buf;
 
         while (true) {
-            // Read the 4-byte header
-            ssize_t bytes_read = read_n_bytes(client_socket, header_buf, HEADER_SIZE, 5); // 5-second timeout
+            // Read the 8-byte header
+            ssize_t bytes_read = read_n_bytes(client_socket, header_buf, HEADER_SIZE, 5);
             if (bytes_read <= 0) {
-                // 0 means connection closed, -1 means error/timeout
                 std::cerr << "Source listener: Source client " << client_ip << " disconnected or read error/timeout." << std::endl;
-                break; // Break inner loop, wait for new source client
+                break;
             }
 
+            // Parse the new header format
             uint8_t magic = header_buf[0];
-            uint8_t padding = header_buf[1];
-            // LENGTH is 16 bits, unsigned, network byte order (big-endian)
+            uint8_t options = header_buf[1];
             uint16_t length = (static_cast<uint16_t>(header_buf[2]) << 8) | header_buf[3];
+            uint16_t checksum = (static_cast<uint16_t>(header_buf[4]) << 8) | header_buf[5];
+            uint16_t padding = (static_cast<uint16_t>(header_buf[6]) << 8) | header_buf[7];
+
+            // Extract sensitive bit (bit 6 only, as per test data)
+            bool is_sensitive = (options & 0x40) != 0;
 
             // --- CTMP Header Validation ---
             if (magic != MAGIC_BYTE) {
-                std::cerr << "Source listener: Invalid MAGIC byte (0x" << std::hex << (int)magic << " received, expected 0x" << (int)MAGIC_BYTE << "). Dropping message from " << client_ip << std::endl;
-                // Attempt to read remaining data if length is valid to clear buffer, then continue
-                if (length <= MAX_PAYLOAD_SIZE) {
-                    data_buf.resize(length);
-                    read_n_bytes(client_socket, data_buf.data(), length, 5);
-                }
-                else {
-                    // If length itself is excessive, we can't trust it to read.
-                    // This is a tricky scenario, but for a proxy, we might just drop and hope next header is valid.
-                    // For robustness, one might need to read until a new magic byte is found, but that's complex.
-                    // For now, we just log and continue.
-                }
+                std::cerr << "Source listener: Invalid MAGIC byte (0x" << std::hex << (int)magic 
+                          << " received, expected 0x" << (int)MAGIC_BYTE << "). Dropping message from " 
+                          << client_ip << std::endl;
                 continue;
             }
-            if (padding != PADDING_BYTE) {
-                std::cerr << "Source listener: Invalid PADDING byte (0x" << std::hex << (int)padding << " received, expected 0x" << (int)PADDING_BYTE << "). Dropping message from " << client_ip << std::endl;
-                if (length <= MAX_PAYLOAD_SIZE) {
-                    data_buf.resize(length);
-                    read_n_bytes(client_socket, data_buf.data(), length, 5);
-                }
-                continue;
-            }
+            
             if (length > MAX_PAYLOAD_SIZE) {
-                std::cerr << "Source listener: Excessive LENGTH (" << length << " bytes received, max allowed is " << MAX_PAYLOAD_SIZE << " bytes). Dropping message from " << client_ip << std::endl;
-                // To properly handle excessive length messages, we must still read the
-                // excessive data from the stream to clear the buffer for subsequent messages.
-                std::vector<uint8_t> temp_buf(length);
-                if (read_n_bytes(client_socket, temp_buf.data(), length, 5) <= 0) {
-                    std::cerr << "Source listener: Error reading excessive data from " << client_ip << ". Disconnecting." << std::endl;
-                    break;
-                }
+                std::cerr << "Source listener: Excessive LENGTH (" << length 
+                          << " bytes received, max allowed is " << MAX_PAYLOAD_SIZE 
+                          << " bytes). Dropping message from " << client_ip << std::endl;
                 continue;
             }
 
             // Read the data payload
             data_buf.resize(length);
-            bytes_read = read_n_bytes(client_socket, data_buf.data(), length, 5); // 5-second timeout
+            bytes_read = read_n_bytes(client_socket, data_buf.data(), length, 5);
             if (bytes_read <= 0) {
-                std::cerr << "Source listener: Source client " << client_ip << " disconnected or read error/timeout during data payload." << std::endl;
+                std::cerr << "Source listener: Source client " << client_ip 
+                          << " disconnected or read error/timeout during data payload." << std::endl;
                 break;
             }
 
-            // Combine header and data into a single message for the queue
+            // Checksum validation for sensitive messages
+            if (is_sensitive) {
+                // For one's complement checksum validation
+                // Replace the checksum field with zeros, then calculate
+                uint8_t header_copy[HEADER_SIZE];
+                memcpy(header_copy, header_buf, HEADER_SIZE);
+                header_copy[4] = 0x00;  // Zero out checksum field
+                header_copy[5] = 0x00;
+                
+                uint16_t calculated_checksum = calculate_checksum(header_copy, data_buf.data(), length);
+                
+                if (calculated_checksum != checksum) {
+                    std::cerr << "Source listener: Invalid CHECKSUM (received: 0x" << std::hex << checksum 
+                              << ", calculated: 0x" << calculated_checksum 
+                              << "). Dropping sensitive message from " << client_ip << std::endl;
+                    continue;
+                }
+            }
+
+            // Message is valid, forward it
             CTMPMessage full_message;
             full_message.data.reserve(HEADER_SIZE + length);
             full_message.data.insert(full_message.data.end(), header_buf, header_buf + HEADER_SIZE);
             full_message.data.insert(full_message.data.end(), data_buf.begin(), data_buf.end());
 
-            // Push message to queue and notify forwarder thread
             {
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 message_queue.push(full_message);
             }
-            queue_cv.notify_one(); // Notify one waiting forwarder thread
-
-            // std::cout << "Source listener: Forwarded message of length " << length << " from " << client_ip << std::endl;
+            queue_cv.notify_one();
         }
         close(client_socket); // Close the disconnected source client socket
         std::cout << "Source listener: Source client " << client_ip << " disconnected. Waiting for new connection..." << std::endl;
@@ -315,12 +320,15 @@ void destination_listener_thread() {
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
         std::cout << "Destination listener: New destination client connected from " << client_ip << ":" << ntohs(client_addr.sin_port) << std::endl;
+        std::cout << "Destination listener: Client " << client_socket << " connected from " 
+                  << client_ip << ":" << ntohs(client_addr.sin_port) << std::endl;
 
         // Add new client socket to the shared vector
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
             destination_clients.push_back(client_socket);
-            std::cout << "Destination listener: Total active destination clients: " << destination_clients.size() << std::endl;
+            std::cout << "Destination listener: Added client " << client_socket 
+                      << ". Total clients: " << destination_clients.size() << std::endl;
         }
     }
     close(server_fd);
@@ -328,9 +336,11 @@ void destination_listener_thread() {
 
 // Thread function for forwarding messages to destination clients
 void message_forwarder_thread() {
-    std::cout << "Message forwarder: Started." << std::endl;
+    std::cout << "Message forwarder: Started and waiting for messages." << std::endl;
     while (true) {
         CTMPMessage message_to_send;
+        
+        std::cout << "Forwarder: Waiting for message in queue..." << std::endl;
         
         // Wait for and immediately pop the message
         {
@@ -340,26 +350,101 @@ void message_forwarder_thread() {
             message_queue.pop();
         }
 
-        // Send to all active clients immediately (no delay)
+        std::cout << "Forwarder: Got message of size " << message_to_send.data.size() 
+                  << ", checking for clients..." << std::endl;
+
+        // Send to all active clients immediately
         std::vector<int> active_clients;
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
+            std::cout << "Forwarder: Found " << destination_clients.size() << " destination clients" << std::endl;
+            
             for (int client_socket : destination_clients) {
-                // Send entire message in one call with MSG_NOSIGNAL to prevent SIGPIPE
+                std::cout << "Forwarder: Sending to client socket " << client_socket << std::endl;
                 ssize_t result = send(client_socket, message_to_send.data.data(), message_to_send.data.size(), MSG_NOSIGNAL);
                 if (result == (ssize_t)message_to_send.data.size()) {
                     active_clients.push_back(client_socket);
+                    std::cout << "Forwarder: Successfully sent " << result << " bytes to client " << client_socket << std::endl;
                 } else {
-                    std::cerr << "Message forwarder: Failed to send " << message_to_send.data.size() << " bytes to destination client socket " << client_socket << ". Removing client." << std::endl;
+                    std::cerr << "Forwarder: Failed to send to client " << client_socket 
+                              << " (sent " << result << " of " << message_to_send.data.size() << " bytes)" << std::endl;
                     close(client_socket);
                 }
             }
             destination_clients = active_clients;
         }
         
-        std::cout << "Forwarder: Forwarded message of size " << message_to_send.data.size()
-                  << " to " << active_clients.size() << " clients." << std::endl;
+        std::cout << "Forwarder: Message forwarded to " << active_clients.size() << " active clients." << std::endl;
     }
+}
+
+// Calculate 16-bit one's complement checksum
+uint16_t calculate_checksum(uint8_t* header, uint8_t* data, uint16_t data_length) {
+    uint32_t sum = 0;
+    
+    // Create a copy of header with checksum field set to 0xCCCC
+    uint8_t header_copy[HEADER_SIZE];
+    memcpy(header_copy, header, HEADER_SIZE);
+    header_copy[4] = 0xCC;
+    header_copy[5] = 0xCC;
+    
+    // Sum header words (4 x 16-bit words)
+    for (int i = 0; i < HEADER_SIZE; i += 2) {
+        uint16_t word = (static_cast<uint16_t>(header_copy[i]) << 8) | header_copy[i + 1];
+        sum += word;
+    }
+    
+    // Sum data words
+    for (uint16_t i = 0; i < data_length; i += 2) {
+        uint16_t word;
+        if (i + 1 < data_length) {
+            word = (static_cast<uint16_t>(data[i]) << 8) | data[i + 1];
+        } else {
+            // Odd number of bytes, pad with zero
+            word = static_cast<uint16_t>(data[i]) << 8;
+        }
+        sum += word;
+    }
+    
+    // Add carry bits
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    
+    // Return one's complement
+    return static_cast<uint16_t>(~sum);
+}
+
+// Calculate checksum for validation (includes the actual checksum in the header)
+uint16_t calculate_checksum_validation(uint8_t* header, uint8_t* data, uint16_t data_length) {
+    uint32_t sum = 0;
+    
+    // Use the header as-is (including the actual checksum)
+    // Sum header words (4 x 16-bit words)
+    for (int i = 0; i < HEADER_SIZE; i += 2) {
+        uint16_t word = (static_cast<uint16_t>(header[i]) << 8) | header[i + 1];
+        sum += word;
+    }
+    
+    // Sum data words
+    for (uint16_t i = 0; i < data_length; i += 2) {
+        uint16_t word;
+        if (i + 1 < data_length) {
+            word = (static_cast<uint16_t>(data[i]) << 8) | data[i + 1];
+        } else {
+            // Odd number of bytes, pad with zero
+            word = static_cast<uint16_t>(data[i]) << 8;
+        }
+        sum += word;
+    }
+    
+    // Add carry bits
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    
+    // Return one's complement
+    return static_cast<uint16_t>(~sum);
 }
 
 int main() {
@@ -372,14 +457,11 @@ int main() {
     std::thread destination_thread(destination_listener_thread);
     destination_thread.detach();
 
-    // Create multiple forwarder threads for faster processing
-    const int NUM_FORWARDER_THREADS = 4; // Adjust as needed
-    for (int i = 0; i < NUM_FORWARDER_THREADS; ++i) {
-        std::thread forwarder_thread(message_forwarder_thread);
-        forwarder_thread.detach();
-    }
+    // Use only ONE forwarder thread to avoid race conditions
+    std::thread forwarder_thread(message_forwarder_thread);
+    forwarder_thread.detach();
 
-    std::cout << "Server initialized with " << NUM_FORWARDER_THREADS << " forwarder threads. Press Ctrl+C to exit." << std::endl;
+    std::cout << "Server initialized. Press Ctrl+C to exit." << std::endl;
     while (true) {
         std::this_thread::sleep_for(std::chrono::minutes(1));
     }
