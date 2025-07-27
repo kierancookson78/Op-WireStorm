@@ -24,7 +24,7 @@ const uint16_t SOURCE_PORT = 33333;
 const uint16_t DESTINATION_PORT = 44444;
 // Maximum allowed data length (excluding header).
 // If an incoming message's LENGTH field exceeds this, the message is dropped.
-const uint16_t MAX_PAYLOAD_SIZE = 8192;
+const uint16_t MAX_PAYLOAD_SIZE = 65535; // Maximum for 16-bit length field
 
 // Structure to hold a complete CTMP message
 struct CTMPMessage {
@@ -331,34 +331,34 @@ void message_forwarder_thread() {
     std::cout << "Message forwarder: Started." << std::endl;
     while (true) {
         CTMPMessage message_to_send;
+        
+        // Wait for and immediately pop the message
         {
-            // Wait for a message to be available in the queue
             std::unique_lock<std::mutex> lock(queue_mutex);
             queue_cv.wait(lock, [] { return !message_queue.empty(); });
             message_to_send = message_queue.front();
             message_queue.pop();
         }
 
-        std::vector<int> active_clients; // Temporarily store active clients for the next iteration
+        // Send to all active clients immediately (no delay)
+        std::vector<int> active_clients;
         {
             std::lock_guard<std::mutex> lock(clients_mutex);
             for (int client_socket : destination_clients) {
-                // Attempt to send the message to the client
-                ssize_t bytes_sent = write_n_bytes(client_socket, message_to_send.data.data(), message_to_send.data.size(), 5); // 5-second timeout
-
-                if (bytes_sent == (ssize_t)message_to_send.data.size()) {
-                    // Successfully sent, keep this client
+                // Send entire message in one call with MSG_NOSIGNAL to prevent SIGPIPE
+                ssize_t result = send(client_socket, message_to_send.data.data(), message_to_send.data.size(), MSG_NOSIGNAL);
+                if (result == (ssize_t)message_to_send.data.size()) {
                     active_clients.push_back(client_socket);
-                }
-                else {
-                    // Failed to send (0 bytes means disconnected, -1 means error/timeout)
+                } else {
                     std::cerr << "Message forwarder: Failed to send " << message_to_send.data.size() << " bytes to destination client socket " << client_socket << ". Removing client." << std::endl;
-                    close(client_socket); // Close the disconnected socket
+                    close(client_socket);
                 }
             }
-            destination_clients = active_clients; // Update the shared list with only active clients
-            // std::cout << "Message forwarder: Remaining active destination clients: " << destination_clients.size() << std::endl;
+            destination_clients = active_clients;
         }
+        
+        std::cout << "Forwarder: Forwarded message of size " << message_to_send.data.size()
+                  << " to " << active_clients.size() << " clients." << std::endl;
     }
 }
 
@@ -366,21 +366,20 @@ int main() {
     std::cout << "Starting CoreTech Message Protocol Proxy Server (C++)..." << std::endl;
 
     // Create and detach threads
-    // Detaching threads means they will run independently and clean up their resources
-    // automatically when they finish, without needing to be joined by the main thread.
-    // This is suitable for long-running server threads.
     std::thread source_thread(source_listener_thread);
     source_thread.detach();
 
     std::thread destination_thread(destination_listener_thread);
     destination_thread.detach();
 
-    std::thread forwarder_thread(message_forwarder_thread);
-    forwarder_thread.detach();
+    // Create multiple forwarder threads for faster processing
+    const int NUM_FORWARDER_THREADS = 4; // Adjust as needed
+    for (int i = 0; i < NUM_FORWARDER_THREADS; ++i) {
+        std::thread forwarder_thread(message_forwarder_thread);
+        forwarder_thread.detach();
+    }
 
-    // Main thread sleeps indefinitely to keep the program alive.
-    // In a more robust application, this might include signal handling for graceful shutdown.
-    std::cout << "Server initialized. Press Ctrl+C to exit." << std::endl;
+    std::cout << "Server initialized with " << NUM_FORWARDER_THREADS << " forwarder threads. Press Ctrl+C to exit." << std::endl;
     while (true) {
         std::this_thread::sleep_for(std::chrono::minutes(1));
     }
