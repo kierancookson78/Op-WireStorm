@@ -7,6 +7,7 @@
 #include <cstring>      // For memory manipulation (memcpy, memset)
 #include <stdexcept>    // For standard exceptions
 #include <cerrno>       // For errno constants (EWOULDBLOCK, EAGAIN, etc.)
+#include <chrono>       // For std::chrono::minutes
 
 // Networking specific headers
 #include <sys/socket.h> // For socket creation, bind, listen, accept, connect, send, recv
