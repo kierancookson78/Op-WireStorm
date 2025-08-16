@@ -1,3 +1,16 @@
+/**
+ * @file wirestorm.cpp
+ * @brief CoreTech Message Protocol (CTMP) Proxy Server Implementation
+ *
+ * This file implements a multi-threaded proxy server that receives CTMP
+ * messages from a single source client and forwards them to multiple
+ * destination clients. The server validates message integrity for sensitive
+ * messages using checksums and handles client connections dynamically.
+ *
+ * @author Kieran Cookson
+ * @date 16 August 2025
+ */
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -22,7 +35,9 @@ const uint16_t SOURCE_PORT = 33333;
 const uint16_t DESTINATION_PORT = 44444;
 const uint16_t MAX_PAYLOAD_SIZE = 65535;
 
-// Structure to hold a complete CTMP message
+/**
+ * @brief Structure to hold a complete CTMP message
+ */
 struct CTMPMessage {
   std::vector<uint8_t> data;
 };
@@ -38,7 +53,19 @@ std::queue<CTMPMessage> message_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 
-// Helper function to read a specific number of bytes from a socket
+/**
+ * @brief Reads a specific number of bytes from a socket with timeout
+ *
+ * This function ensures that exactly n_bytes are read from the socket,
+ * handling partial reads and network interruptions.
+ *
+ * @param sockfd Socket file descriptor to read from
+ * @param buffer Buffer to store the read data
+ * @param n_bytes Number of bytes to read
+ * @param timeout_sec Timeout in seconds for the read operation
+ * @return Number of bytes read on success, 0 if connection closed, -1 on
+ * error/timeout
+ */
 ssize_t read_n_bytes(int sockfd, uint8_t* buffer, size_t n_bytes,
                      int timeout_sec) {
   size_t bytes_read = 0;
@@ -48,6 +75,7 @@ ssize_t read_n_bytes(int sockfd, uint8_t* buffer, size_t n_bytes,
   tv.tv_usec = 0;
   setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
+  // Continue reading until all requested bytes are received
   while (bytes_read < n_bytes) {
     ssize_t result = recv(sockfd, buffer + bytes_read, n_bytes - bytes_read, 0);
     if (result == 0) {
@@ -56,7 +84,9 @@ ssize_t read_n_bytes(int sockfd, uint8_t* buffer, size_t n_bytes,
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
         std::cerr << "Read timeout on socket " << sockfd << std::endl;
         return -1;
-      } else if (errno == EINTR) {
+      }
+      // Handle interrupted system call - retry the operation
+      else if (errno == EINTR) {
         continue;
       } else {
         std::cerr << "Error reading from socket " << sockfd << ": "
@@ -69,7 +99,14 @@ ssize_t read_n_bytes(int sockfd, uint8_t* buffer, size_t n_bytes,
   return bytes_read;
 }
 
-// Thread function for listening to the single source client
+/**
+ * @brief Thread function for listening to the single source client
+ *
+ * This function handles incoming connections from source clients, validates
+ * CTMP messages, performs checksum verification for sensitive messages, and
+ * queues valid messages for forwarding. Only one source client is accepted at a
+ * time.
+ */
 void source_listener_thread() {
   int server_fd;
   struct sockaddr_in address;
@@ -97,6 +134,7 @@ void source_listener_thread() {
     return;
   }
 
+  // Listen with queue size of 1 for single source client
   if (listen(server_fd, 1) < 0) {
     std::cerr << "Source listener: Listen failed" << std::endl;
     close(server_fd);
@@ -106,6 +144,7 @@ void source_listener_thread() {
   std::cout << "Source listener: Listening on 127.0.0.1:" << SOURCE_PORT
             << std::endl;
 
+  // Main acceptance loop - handles one source client at a time
   while (true) {
     std::cout << "Source listener: Waiting for a source client connection..."
               << std::endl;
@@ -127,6 +166,7 @@ void source_listener_thread() {
     uint8_t header_buf[HEADER_SIZE];
     std::vector<uint8_t> data_buf;
 
+    // Message processing loop for current client
     while (true) {
       ssize_t bytes_read =
           read_n_bytes(client_socket, header_buf, HEADER_SIZE, 5);
@@ -136,6 +176,7 @@ void source_listener_thread() {
         break;
       }
 
+      // Parse CTMP header fields
       uint8_t magic = header_buf[0];
       uint8_t options = header_buf[1];
       uint16_t length =
@@ -143,6 +184,7 @@ void source_listener_thread() {
       uint16_t checksum =
           (static_cast<uint16_t>(header_buf[4]) << 8) | header_buf[5];
 
+      // Check if message is marked as sensitive (bit 6 of options field)
       bool is_sensitive = (options & 0x40) != 0;
 
       if (magic != MAGIC_BYTE) {
@@ -168,6 +210,7 @@ void source_listener_thread() {
 
       // Checksum validation for sensitive messages
       if (is_sensitive) {
+        // Create header copy with zeroed checksum field for calculation
         uint8_t header_copy[HEADER_SIZE];
         memcpy(header_copy, header_buf, HEADER_SIZE);
         header_copy[4] = 0x00;
@@ -184,6 +227,7 @@ void source_listener_thread() {
         }
       }
 
+      // Construct complete message for forwarding (header + payload)
       CTMPMessage full_message;
       full_message.data.reserve(HEADER_SIZE + length);
       full_message.data.insert(full_message.data.end(), header_buf,
@@ -191,6 +235,7 @@ void source_listener_thread() {
       full_message.data.insert(full_message.data.end(), data_buf.begin(),
                                data_buf.end());
 
+      // Add message to forwarding queue
       {
         std::lock_guard<std::mutex> lock(queue_mutex);
         message_queue.push(full_message);
@@ -204,7 +249,12 @@ void source_listener_thread() {
   close(server_fd);
 }
 
-// Thread function for listening to and accepting destination clients
+/**
+ * @brief Thread function for listening to and accepting destination clients
+ *
+ * This function handles incoming connections from destination clients.
+ * Multiple destination clients can connect simultaneously.
+ */
 void destination_listener_thread() {
   int server_fd;
   struct sockaddr_in address;
@@ -232,6 +282,7 @@ void destination_listener_thread() {
     return;
   }
 
+  // Listen with queue size of 10 for multiple destination clients
   if (listen(server_fd, 10) < 0) {
     std::cerr << "Destination listener: Listen failed" << std::endl;
     close(server_fd);
@@ -241,6 +292,7 @@ void destination_listener_thread() {
   std::cout << "Destination listener: Listening on 127.0.0.1:"
             << DESTINATION_PORT << std::endl;
 
+  // Continuously accept new destination clients
   while (true) {
     int client_socket;
     struct sockaddr_in client_addr;
@@ -268,13 +320,20 @@ void destination_listener_thread() {
   close(server_fd);
 }
 
-// Thread function for forwarding messages to destination clients
+/**
+ * @brief Thread function for forwarding messages to destination clients
+ *
+ * This function continuously processes messages from the queue and forwards
+ * them to all connected destination clients. Failed clients are automatically
+ * removed.
+ */
 void message_forwarder_thread() {
   std::cout << "Message forwarder: Started and waiting for messages."
             << std::endl;
   while (true) {
     CTMPMessage message_to_send;
 
+    // Wait for messages in the queue
     {
       std::unique_lock<std::mutex> lock(queue_mutex);
       queue_cv.wait(lock, [] { return !message_queue.empty(); });
@@ -285,6 +344,7 @@ void message_forwarder_thread() {
     std::vector<int> active_clients;
     {
       std::lock_guard<std::mutex> lock(clients_mutex);
+      // Attempt to send to each client, keeping only successful ones
       for (int client_socket : destination_clients) {
         ssize_t result = send(client_socket, message_to_send.data.data(),
                               message_to_send.data.size(), MSG_NOSIGNAL);
@@ -301,32 +361,47 @@ void message_forwarder_thread() {
   }
 }
 
-// Calculate 16-bit one's complement checksum
+/**
+ * @brief Calculate 16-bit one's complement checksum for CTMP messages
+ *
+ * Implements the standard Internet checksum algorithm. The checksum field
+ * in the header is set to 0xCCCC during calculation.
+ *
+ * @param header Pointer to the message header (8 bytes)
+ * @param data Pointer to the message payload data
+ * @param data_length Length of the payload data in bytes
+ * @return 16-bit one's complement checksum value
+ */
 uint16_t calculate_checksum(uint8_t* header, uint8_t* data,
                             uint16_t data_length) {
   uint32_t sum = 0;
 
+  // Create header copy with special checksum field value for calculation
   uint8_t header_copy[HEADER_SIZE];
   memcpy(header_copy, header, HEADER_SIZE);
   header_copy[4] = 0xCC;
   header_copy[5] = 0xCC;
 
+  // Sum header in 16-bit words
   for (int i = 0; i < HEADER_SIZE; i += 2) {
     uint16_t word =
         (static_cast<uint16_t>(header_copy[i]) << 8) | header_copy[i + 1];
     sum += word;
   }
 
+  // Sum payload data in 16-bit words
   for (uint16_t i = 0; i < data_length; i += 2) {
     uint16_t word;
     if (i + 1 < data_length) {
       word = (static_cast<uint16_t>(data[i]) << 8) | data[i + 1];
     } else {
+      // Odd byte count - pad with zero
       word = static_cast<uint16_t>(data[i]) << 8;
     }
     sum += word;
   }
 
+  // Handle carry bits by folding them back into the sum
   while (sum >> 16) {
     sum = (sum & 0xFFFF) + (sum >> 16);
   }
@@ -334,6 +409,13 @@ uint16_t calculate_checksum(uint8_t* header, uint8_t* data,
   return static_cast<uint16_t>(~sum);
 }
 
+/**
+ * @brief Main function - Entry point for the CTMP proxy server
+ *
+ * Initializes and starts all server threads, then keeps the server running.
+ *
+ * @return Exit status (0 for normal termination)
+ */
 int main() {
   std::cout << "Starting CoreTech Message Protocol Proxy Server (C++)..."
             << std::endl;
@@ -348,6 +430,7 @@ int main() {
   forwarder_thread.detach();
 
   std::cout << "Server initialized. Press Ctrl+C to exit." << std::endl;
+  // Keep main thread alive - server runs until manually terminated
   while (true) {
     std::this_thread::sleep_for(std::chrono::minutes(1));
   }
