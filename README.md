@@ -1,10 +1,6 @@
 # Building and Running Instructions
-## prerequisites
-First install and IDE such as Visual Studio Code:
-``` bash
-sudo snap install --classic code
-```
-Next you will need to install the g++ compiler:
+## Prerequisites
+Firstly, you will need to install the g++ compiler:
 ``` bash
 sudo apt install build-essential
 ```
