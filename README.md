@@ -38,9 +38,14 @@ Open a new terminal window with the other still open then run the compulsory tes
 cd Op-WireStorm
 python3.12 tests.py
 ```
+If the test was successful you should see:
+<img width="983" height="572" alt="successful test 1" src="https://github.com/user-attachments/assets/940d96c9-4a9f-40f4-af1e-9698cab342b7" />
+
 To run the optional extended test cases run:
 ``` bash
 cd wire-storm-reloaded-1.0.0
 python3.12 tests.py
 ```
 from within the projects root directory
+If the test was successful you should see:
+<img width="796" height="383" alt="successful test 2" src="https://github.com/user-attachments/assets/5b56e62e-d240-4d35-97af-c02c8e3e8ee6" />
